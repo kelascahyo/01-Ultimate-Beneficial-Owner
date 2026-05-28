@@ -4,34 +4,32 @@ import networkx as nx
 import json
 import streamlit.components.v1 as components
 
+# 1. Konfigurasi Awal Halaman
 st.set_page_config(layout="wide", page_title="Tax Network & UBO Analyzer")
 
 st.title("🕸️ Tax Network & Ultimate Beneficial Owner (UBO) Analyzer")
 st.markdown("""
-Aplikasi ini mendeteksi struktur kepemilikan berlapis, akumulasi persentase saham, dan menemukan **Ultimate Beneficial Owner (UBO)** menggunakan kombinasi **NetworkX** dan **D3.js**.
+Aplikasi ini mendeteksi struktur kepemilikan berlapis, akumulasi persentase saham, dan menemukan **Ultimate Beneficial Owner (UBO)** menggunakan analisis jaringan **NetworkX** dan visualisasi interaktif **D3.js**.
 """)
 
-# Load Data
+# 2. Fungsi Load Data CSV
 @st.cache_data
 def load_data():
-    nodes = pd.read_csv('nodes_masked.csv')
-    edges = pd.read_csv('edges_masked.csv')
-    nodes['id'] = nodes['id'].astype(int)
-    edges['sumber'] = edges['sumber'].astype(int)
-    edges['target'] = edges['target'].astype(int)
-    return nodes, edges
+    try:
+        nodes = pd.read_csv('nodes_masked.csv')
+        edges = pd.read_csv('edges_masked.csv')
+        # Pastikan tipe data ID seragam sebagai integer
+        nodes['id'] = nodes['id'].astype(int)
+        edges['sumber'] = edges['sumber'].astype(int)
+        edges['target'] = edges['target'].astype(int)
+        return nodes, edges
+    except Exception as e:
+        st.error(f"Gagal membaca file CSV: {e}. Pastikan 'nodes_masked.csv' dan 'edges_masked.csv' ada di folder aplikasi.")
+        st.stop()
 
-try:
-    nodes_df, edges_df = load_data()
-except FileNotFoundError:
-    st.error("File 'nodes_masked.csv' dan 'edges_masked.csv' tidak ditemukan.")
-    st.stop()
+nodes_df, edges_df = load_data()
 
-# Sidebar Search
-st.sidebar.header("🔍 Kontrol & Pencarian")
-search_query = st.sidebar.text_input("Cari Nama / ID Wajib Pajak:", "").strip()
-
-# Build Graph
+# 3. Membangun Graph NetworkX
 @st.cache_resource
 def build_graph(_nodes, _edges):
     G = nx.DiGraph()
@@ -50,7 +48,7 @@ def build_graph(_nodes, _edges):
 
 G = build_graph(nodes_df, edges_df)
 
-# UBO DFS Tracking
+# 4. Logika DFS Melacak Jalur UBO ke Atas (Predecessors)
 def find_ubo_paths(graph, target_node_id):
     paths = []
     
@@ -71,10 +69,12 @@ def find_ubo_paths(graph, target_node_id):
             edge_key = (parent, current_node)
             if edge_key in visited_edges:
                 continue
+                
             edge_data = graph.get_edge_data(parent, current_node)
             pct = edge_data.get('persentase', 0)
             pct_factor = pct / 100.0 if pct > 1.0 else pct
-            if pct_factor <= 0: pct_factor = 0.0001
+            if pct_factor <= 0: 
+                pct_factor = 0.0001
             
             visited_edges.add(edge_key)
             dfs(parent, [parent] + current_path, current_mult * pct_factor, visited_edges)
@@ -83,7 +83,6 @@ def find_ubo_paths(graph, target_node_id):
     if target_node_id in graph:
         parents = list(graph.predecessors(target_node_id))
         if not parents:
-            # Jika dia pucuk tertinggi, catat diri sendiri sebagai UBO
             paths.append({
                 "path": [target_node_id],
                 "multiplier": 1.0,
@@ -93,7 +92,12 @@ def find_ubo_paths(graph, target_node_id):
             })
         else:
             dfs(target_node_id, [target_node_id], 1.0, set())
+            
     return paths
+
+# 5. Sidebar Kontrol Pencarian
+st.sidebar.header("🔍 Kontrol & Pencarian")
+search_query = st.sidebar.text_input("Cari Nama / ID Wajib Pajak:", "").strip()
 
 selected_node_id = None
 if search_query:
@@ -105,18 +109,19 @@ if search_query:
     else:
         st.sidebar.warning("Wajib Pajak tidak ditemukan.")
 
-# Pemrosesan Data Jaringan
+# Variables untuk menampung komponen visualisasi
+nodes_to_include = set()
+edges_to_include = set()
+ubo_table_data = []
+
+# 6. Pemrosesan Filter Node & Edge Jaringan
 if selected_node_id is not None:
     st.subheader(f"📊 Hasil Analisis Jalur UBO untuk: {G.nodes[selected_node_id].get('nama')} ({selected_node_id})")
     
     ubo_results = find_ubo_paths(G, selected_node_id)
-    
-    nodes_to_include = {selected_node_id}
-    edges_to_include = set()
-    ubo_table_data = []
+    nodes_to_include.add(selected_node_id)
     
     for path_info in ubo_results:
-        # Masukkan ke tabel hanya jika benar-benar membentuk jalur atau dia adalah UBO tunggal
         ubo_table_data.append({
             "UBO ID": path_info["ubo_id"],
             "Nama UBO": path_info["ubo_nama"],
@@ -124,91 +129,82 @@ if selected_node_id is not None:
             "Akumulasi Kepemilikan": f"{path_info['multiplier'] * 100:.4f}%"
         })
         p = path_info["path"]
-        for n in p: nodes_to_include.add(n)
-        for i in range(len(p) - 1): edges_to_include.add((p[i], p[i+1]))
+        for n in p: 
+            nodes_to_include.add(n)
+        for i in range(len(p) - 1): 
+            edges_to_include.add((p[i], p[i+1]))
             
     st.dataframe(pd.DataFrame(ubo_table_data), use_container_width=True)
     
-    # Tambahkan Anak Perusahaan (Successors) ke Bawah
+    # Tambahkan anak perusahaan langsung di bawahnya (jika ada)
     for successor in G.successors(selected_node_id):
         nodes_to_include.add(successor)
         edges_to_include.add((selected_node_id, successor))
-
-    # 🚨 ANTI-BLANK FALLBACK TRIGGER: Jika node terisolasi (tidak punya relasi atas maupun bawah)
+        
+    # Kasus Fallback Khusus: Jika node sebatang kara/tidak memiliki relasi atas-bawah sama sekali
     if len(edges_to_include) == 0:
-        # Cari 5 transaksi acak yang berhubungan dengan node ini di master dataframe sebagai rumpun bantuan
-        backup_edges = edges_df[(edges_df['sumber'] == selected_node_id) | (edges_df['target'] == selected_node_id)].head(5)
+        # Pinjam 3 sampel relasi teratas dari database agar D3 memiliki struktur untuk digambar
+        backup_edges = edges_df.head(3)
         for _, r in backup_edges.iterrows():
             nodes_to_include.add(int(r['sumber']))
             nodes_to_include.add(int(r['target']))
             edges_to_include.add((int(r['sumber']), int(r['target'])))
-
-    # Jika BENAR-BENAR sebatang kara di database, ambil 3 data sampel acak luar agar D3 tidak crash kosong
-    if len(edges_to_include) == 0:
-        sample = edges_df.head(3)
-        for _, r in sample.iterrows():
-            nodes_to_include.add(int(r['sumber']))
-            nodes_to_include.add(int(r['target']))
-            edges_to_include.add((int(r['sumber']), int(r['target'])))
-        
-    # Buat JSON Node List
-    d3_nodes = []
-    for nid in nodes_to_include:
-        if nid in G:
-            d3_nodes.append({
-                "id": str(nid),
-                "nama": str(G.nodes[nid].get('nama', 'Unknown')),
-                "jenis_node": str(G.nodes[nid].get('jenis_node', 'Unknown')),
-                "is_target": bool(nid == selected_node_id)
-            })
-            
-    # Buat JSON Link List (Validasi Ketat Kedua Ujung Eksis)
-    d3_links = []
-    for u, v in edges_to_include:
-        if u in nodes_to_include and v in nodes_to_include:
-            if G.has_edge(u, v):
-                d3_links.append({
-                    "source": str(u),
-                    "target": str(v),
-                    "persentase": float(G[u][v].get('persentase', 0)),
-                    "nilai": float(G[u][v].get('nilai', 0)),
-                    "dividen": float(G[u][v].get('dividen', 0))
-                })
-            
-    network_data = {"nodes": d3_nodes, "links": d3_links}
-    
 else:
-    st.info("💡 Masukkan nama atau ID Wajib Pajak di sidebar untuk mendeteksi UBO.")
-    top_edges = edges_df.nlargest(40, 'nilai')
-    sample_node_ids = set(top_edges['sumber'].tolist() + top_edges['target'].tolist())
-    
-    d3_nodes = [{"id": str(nid), "nama": str(G.nodes[nid].get('nama', 'Unknown')), "jenis_node": str(G.nodes[nid].get('jenis_node', 'Unknown')), "is_target": False} for nid in sample_node_ids if nid in G]
-    d3_links = [{"source": str(int(r['sumber'])), "target": str(int(r['target'])), "persentase": float(r['persentase']), "nilai": float(r['nilai']), "dividen": float(r['dividen'])} for _, r in top_edges.iterrows()]
-    network_data = {"nodes": d3_nodes, "links": d3_links}
+    st.info("💡 Masukkan nama atau ID Wajib Pajak di sidebar untuk melihat visualisasi spesifik.")
+    # Default view awal: Tampilkan 30 relasi dengan nilai nominal tertinggi
+    top_edges = edges_df.nlargest(30, 'nilai')
+    for _, r in top_edges.iterrows():
+        nodes_to_include.add(int(r['sumber']))
+        nodes_to_include.add(int(r['target']))
+        edges_to_include.add((int(r['sumber']), int(r['target'])))
 
-json_network_data = json.dumps(network_data)
+# 7. Konversi Data ke Format JSON D3 secara Aman
+d3_nodes = []
+for nid in nodes_to_include:
+    if nid in G:
+        d3_nodes.append({
+            "id": str(nid),
+            "nama": str(G.nodes[nid].get('nama', 'Unknown')),
+            "jenis_node": str(G.nodes[nid].get('jenis_node', 'Unknown')),
+            "is_target": bool(nid == selected_node_id)
+        })
 
-html_template = """
+d3_links = []
+for u, v in edges_to_include:
+    if u in nodes_to_include and v in nodes_to_include:
+        if G.has_edge(u, v):
+            d3_links.append({
+                "source": str(u),
+                "target": str(v),
+                "persentase": float(G[u][v].get('persentase', 0)),
+                "nilai": float(G[u][v].get('nilai', 0)),
+                "dividen": float(G[u][v].get('dividen', 0))
+            })
+
+network_json_string = json.dumps({"nodes": d3_nodes, "links": d3_links})
+
+# 8. Template HTML/CSS/JS (Menggunakan Data Atribut HTML)
+html_code = f"""
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <script src="https://d3js.org/d3.v7.min.js"></script>
     <style>
-        body { font-family: sans-serif; margin: 0; background-color: #0e1117; color: #ffffff; overflow: hidden; }
-        #graph-container { width: 100vw; height: 600px; background-color: #131722; border-radius: 8px; position: relative; }
-        .node { stroke: #22252a; stroke-width: 2px; cursor: pointer; }
-        .node:hover { stroke: #fff !important; stroke-width: 3px; }
-        .link { stroke: #4f5660; stroke-opacity: 0.7; fill: none; }
-        .label { font-size: 11px; fill: #e0e0e0; pointer-events: none; text-shadow: 0px 1px 3px rgba(0,0,0,0.9); }
-        #tooltip { position: absolute; background: rgba(20, 24, 33, 0.95); border: 1px solid #3b4252; padding: 10px; border-radius: 5px; font-size: 12px; color: #eceff4; pointer-events: none; visibility: hidden; box-shadow: 0px 4px 12px rgba(0,0,0,0.5); z-index: 10; }
-        .legend { position: absolute; top: 15px; left: 15px; background: rgba(30, 34, 42, 0.85); padding: 12px; border-radius: 6px; border: 1px solid #2e3440; font-size: 11px; line-height: 1.6; pointer-events: none; }
-        .legend-item { display: flex; align-items: center; margin-bottom: 4px; }
-        .legend-color { width: 12px; height: 12px; border-radius: 50%; margin-right: 8px; }
+        body {{ font-family: sans-serif; margin: 0; background-color: #0e1117; color: #ffffff; overflow: hidden; }}
+        #graph-container {{ width: 100vw; height: 600px; background-color: #131722; border-radius: 8px; position: relative; }}
+        .node {{ stroke: #22252a; stroke-width: 2px; cursor: pointer; }}
+        .node:hover {{ stroke: #fff !important; stroke-width: 3px; }}
+        .link {{ stroke: #4f5660; stroke-opacity: 0.7; fill: none; }}
+        .label {{ font-size: 11px; fill: #e0e0e0; pointer-events: none; text-shadow: 0px 1px 3px rgba(0,0,0,0.9); }}
+        #tooltip {{ position: absolute; background: rgba(20, 24, 33, 0.95); border: 1px solid #3b4252; padding: 10px; border-radius: 5px; font-size: 12px; color: #eceff4; pointer-events: none; visibility: hidden; box-shadow: 0px 4px 12px rgba(0,0,0,0.5); z-index: 10; }}
+        .legend {{ position: absolute; top: 15px; left: 15px; background: rgba(30, 34, 42, 0.85); padding: 12px; border-radius: 6px; border: 1px solid #2e3440; font-size: 11px; line-height: 1.6; pointer-events: none; }}
+        .legend-item {{ display: flex; align-items: center; margin-bottom: 4px; }}
+        .legend-color {{ width: 12px; height: 12px; border-radius: 50%; margin-right: 8px; }}
     </style>
 </head>
 <body>
-    <div id="graph-container">
+    <div id="graph-container" data-network='{network_json_string}'>
         <div class="legend">
             <strong>Kategori Wajib Pajak</strong>
             <div class="legend-item"><div class="legend-color" style="background: #1f77b4;"></div>Badan (Perusahaan)</div>
@@ -224,16 +220,18 @@ html_template = """
     </div>
 
     <script>
-        const graphData = __NETWORK_DATA__;
+        // MENGAMBIL DATA DARI DOM HTML - MENJAMIN STRUKTUR DATA TERSEDIA SAAT RUNTIME
+        const container = document.getElementById('graph-container');
+        const graphData = JSON.parse(container.dataset.network);
 
-        const width = document.getElementById('graph-container').clientWidth || 1000;
+        const width = container.clientWidth || 1000;
         const height = 600;
 
         const svg = d3.select("#svg-graph").attr("viewBox", [0, 0, width, height]);
         
-        svg.append("defs").flatMap(d => ['normal', 'highlighted']).forEach(type => {
+        svg.append("defs").flatMap(d => ['normal', 'highlighted']).forEach(type => {{
             svg.select("defs").append("marker")
-                .attr("id", `arrow-${type}`)
+                .attr("id", `arrow-${{type}}`)
                 .attr("viewBox", "0 -5 10 10")
                 .attr("refX", 23).attr("refY", 0)
                 .attr("markerWidth", 6).attr("markerHeight", 6)
@@ -241,21 +239,21 @@ html_template = """
                 .append("path")
                 .attr("fill", type === 'highlighted' ? "#ebcb4b" : "#4f5660")
                 .attr("d", "M0,-5L10,0L0,5");
-        });
+        }});
 
         const gContainer = svg.append("g");
         svg.call(d3.zoom().scaleExtent([0.1, 4]).on("zoom", (e) => gContainer.attr("transform", e.transform)));
 
-        function getNodeColor(d) {
+        function getNodeColor(d) {{
             if (d.is_target) return "#bf616a"; 
-            switch(d.jenis_node) {
+            switch(d.jenis_node) {{
                 case "Badan": return "#1f77b4";
                 case "OP": return "#2ca02c";
                 case "LN": return "#ff7f0e";
                 case "Non NPWP": return "#d62728";
                 default: return "#969696";
-            }
-        }
+            }}
+        }}
 
         const simulation = d3.forceSimulation(graphData.nodes)
             .force("link", d3.forceLink(graphData.links).id(d => d.id).distance(150))
@@ -282,40 +280,40 @@ html_template = """
 
         const tooltip = d3.select("#tooltip");
 
-        node.on("mouseover", function(e, d) {
+        node.on("mouseover", function(e, d) {{
             tooltip.style("visibility", "visible")
-                .html(`<strong>ID:</strong> ${d.id}<br/><strong>Nama:</strong> ${d.nama}<br/><strong>Jenis Node:</strong> ${d.jenis_node}`);
-        }).on("mousemove", e => tooltip.style("top", (e.pageY - 10) + "px").style("left", (e.pageX + 15) + "px"))
+                .html(`<strong>ID:</strong> ${{d.id}}<br/><strong>Nama:</strong> ${{d.nama}}<br/><strong>Jenis:</strong> ${{d.jenis_node}}`);
+        }}).on("mousemove", e => tooltip.style("top", (e.pageY - 10) + "px").style("left", (e.pageX + 15) + "px"))
            .on("mouseout", () => tooltip.style("visibility", "hidden"))
-           .on("click", function(e, d) {
+           .on("click", function(e, d) {{
                 link.style("stroke", l => (l.target.id === d.id || l.source.id === d.id) ? "#ebcb4b" : "#4f5660")
                     .style("stroke-opacity", l => (l.target.id === d.id || l.source.id === d.id) ? 1.0 : 0.15)
                     .attr("marker-end", l => (l.target.id === d.id || l.source.id === d.id) ? "url(#arrow-highlighted)" : "url(#arrow-normal)");
-           });
+           }});
 
-        link.on("mouseover", function(e, d) {
+        link.on("mouseover", function(e, d) {{
             tooltip.style("visibility", "visible")
-                .html(`<strong>Detail Kepemilikan Saham:</strong><br/>
-                       • Porsi Saham: ${d.persentase}%<br/>
-                       • Nilai Nominal: Rp ${Number(d.nilai).toLocaleString('id-ID')}<br/>
-                       • Aliran Dividen: Rp ${Number(d.dividen).toLocaleString('id-ID')}`);
-        }).on("mousemove", e => tooltip.style("top", (e.pageY - 10) + "px").style("left", (e.pageX + 15) + "px"))
+                .html(`<strong>Detail Saham:</strong><br/>
+                       • Porsi: ${{d.persentase}}%<br/>
+                       • Nominal: Rp ${{Number(d.nilai).toLocaleString('id-ID')}}<br/>
+                       • Dividen: Rp ${{Number(d.dividen).toLocaleString('id-ID')}}`);
+        }}).on("mousemove", e => tooltip.style("top", (e.pageY - 10) + "px").style("left", (e.pageX + 15) + "px"))
            .on("mouseout", () => tooltip.style("visibility", "hidden"));
 
-        simulation.on("tick", () => {
-            link.attr("d", d => `M${d.source.x},${d.source.y} L${d.target.x},${d.target.y}`);
+        simulation.on("tick", () => {{
+            link.attr("d", d => `M${{d.source.x}},${{d.source.y}} L${{d.target.x}},${{d.target.y}}`);
             node.attr("cx", d => d.x).attr("cy", d => d.y);
             label.attr("x", d => d.x).attr("y", d => d.y);
-        });
+        }});
 
         node.call(d3.drag()
-            .on("start", (e, d) => { if (!e.active) simulation.alphaTarget(0.3).restart(); d.fx = d.x; d.fy = d.y; })
-            .on("drag", (e, d) => { d.fx = e.x; d.fy = e.y; })
-            .on("end", (e, d) => { if (!e.active) simulation.alphaTarget(0); d.fx = null; d.fy = null; }));
+            .on("start", (e, d) => {{ if (!e.active) simulation.alphaTarget(0.3).restart(); d.fx = d.x; d.fy = d.y; }})
+            .on("drag", (e, d) => {{ d.fx = e.x; d.fy = e.y; }})
+            .on("end", (e, d) => {{ if (!e.active) simulation.alphaTarget(0); d.fx = null; d.fy = null; }}));
     </script>
 </body>
 </html>
 """
 
-final_html = html_template.replace("__NETWORK_DATA__", json_network_data)
-components.html(final_html, height=620, scrolling=False)
+# Render komponen HTML ke Streamlit
+components.html(html_code, height=620, scrolling=False)
