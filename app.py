@@ -169,9 +169,10 @@ else:
     d3_links = [{"source": str(int(r['sumber'])), "target": str(int(r['target'])), "persentase": float(r['persentase']), "nilai": float(r['nilai']), "dividen": float(r['dividen'])} for _, r in top_edges.iterrows()]
     network_data = {"nodes": d3_nodes, "links": d3_links}
 
-# AMAN: Gunakan json.dumps untuk mencegah kerusakan sintaks string JavaScript
+# Ubah ke JSON String secara aman
 json_network_data = json.dumps(network_data)
 
+# Menggunakan placeholder __NETWORK_DATA__ untuk menghindari konflik persen (%) dengan Python string formatting
 html_template = """
 <!DOCTYPE html>
 <html lang="en">
@@ -208,8 +209,8 @@ html_template = """
     </div>
 
     <script>
-        // Membaca data JSON dengan aman tanpa intervensi f-string Python langsung
-        const graphData = %s;
+        // Placeholder akan diganti melalui fungsi .replace() Python secara aman
+        const graphData = __NETWORK_DATA__;
 
         const width = document.getElementById('graph-container').clientWidth || 1000;
         const height = 600;
@@ -301,6 +302,9 @@ html_template = """
     </script>
 </body>
 </html>
-""" % json_network_data
+"""
 
-components.html(html_template, height=620, scrolling=False)
+# Gunakan fungsi bawaan string `.replace()` agar aman dari konflik parsing % di CSS/JS
+final_html = html_template.replace("__NETWORK_DATA__", json_network_data)
+
+components.html(final_html, height=620, scrolling=False)
