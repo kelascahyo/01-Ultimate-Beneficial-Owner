@@ -8,7 +8,7 @@ st.set_page_config(layout="wide", page_title="Tax Network & UBO Analyzer")
 
 st.title("🕸️ Tax Network & Ultimate Beneficial Owner (UBO) Analyzer")
 st.markdown("""
-Aplikasi ini mendeteksi struktur kepemilikan berlapis, akumulasi persentase saham, dan menemukan **Ultimate Beneficial Owner (UBO)** seperti Orang Pribadi (OP) atau Perusahaan Luar Negeri (LN) dari entitas Badan Wajib Pajak menggunakan kombinasi **NetworkX** dan **D3.js**.
+Aplikasi ini mendeteksi struktur kepemilikan berlapis, akumulasi persentase saham, dan menemukan **Ultimate Beneficial Owner (UBO)** menggunakan kombinasi **NetworkX** dan **D3.js**.
 """)
 
 # Load Data
@@ -16,7 +16,6 @@ Aplikasi ini mendeteksi struktur kepemilikan berlapis, akumulasi persentase saha
 def load_data():
     nodes = pd.read_csv('nodes_masked.csv')
     edges = pd.read_csv('edges_masked.csv')
-    # Memastikan format ID seragam sebagai integer
     nodes['id'] = nodes['id'].astype(int)
     edges['sumber'] = edges['sumber'].astype(int)
     edges['target'] = edges['target'].astype(int)
@@ -25,14 +24,14 @@ def load_data():
 try:
     nodes_df, edges_df = load_data()
 except FileNotFoundError:
-    st.error("File 'nodes_masked.csv' dan 'edges_masked.csv' tidak ditemukan. Pastikan kedua file berada di direktori yang sama.")
+    st.error("File 'nodes_masked.csv' dan 'edges_masked.csv' tidak ditemukan.")
     st.stop()
 
-# Sidebar for Filters and Search
+# Sidebar Search
 st.sidebar.header("🔍 Kontrol & Pencarian")
 search_query = st.sidebar.text_input("Cari Nama / ID Wajib Pajak:", "").strip()
 
-# Build NetworkX Graph
+# Build Graph
 @st.cache_resource
 def build_graph(_nodes, _edges):
     G = nx.DiGraph()
@@ -51,7 +50,7 @@ def build_graph(_nodes, _edges):
 
 G = build_graph(nodes_df, edges_df)
 
-# UBO Pathfinding Logic via DFS
+# UBO DFS Tracking
 def find_ubo_paths(graph, target_node_id):
     paths = []
     
@@ -72,12 +71,10 @@ def find_ubo_paths(graph, target_node_id):
             edge_key = (parent, current_node)
             if edge_key in visited_edges:
                 continue
-                
             edge_data = graph.get_edge_data(parent, current_node)
             pct = edge_data.get('persentase', 0)
             pct_factor = pct / 100.0 if pct > 1.0 else pct
-            if pct_factor <= 0: 
-                pct_factor = 0.0001
+            if pct_factor <= 0: pct_factor = 0.0001
             
             visited_edges.add(edge_key)
             dfs(parent, [parent] + current_path, current_mult * pct_factor, visited_edges)
@@ -86,6 +83,7 @@ def find_ubo_paths(graph, target_node_id):
     if target_node_id in graph:
         parents = list(graph.predecessors(target_node_id))
         if not parents:
+            # Jika dia pucuk tertinggi, catat diri sendiri sebagai UBO
             paths.append({
                 "path": [target_node_id],
                 "multiplier": 1.0,
@@ -95,7 +93,6 @@ def find_ubo_paths(graph, target_node_id):
             })
         else:
             dfs(target_node_id, [target_node_id], 1.0, set())
-            
     return paths
 
 selected_node_id = None
@@ -108,7 +105,7 @@ if search_query:
     else:
         st.sidebar.warning("Wajib Pajak tidak ditemukan.")
 
-# Pembuatan data visualisasi
+# Pemrosesan Data Jaringan
 if selected_node_id is not None:
     st.subheader(f"📊 Hasil Analisis Jalur UBO untuk: {G.nodes[selected_node_id].get('nama')} ({selected_node_id})")
     
@@ -119,6 +116,7 @@ if selected_node_id is not None:
     ubo_table_data = []
     
     for path_info in ubo_results:
+        # Masukkan ke tabel hanya jika benar-benar membentuk jalur atau dia adalah UBO tunggal
         ubo_table_data.append({
             "UBO ID": path_info["ubo_id"],
             "Nama UBO": path_info["ubo_nama"],
@@ -126,19 +124,34 @@ if selected_node_id is not None:
             "Akumulasi Kepemilikan": f"{path_info['multiplier'] * 100:.4f}%"
         })
         p = path_info["path"]
-        for n in p:
-            nodes_to_include.add(n)
-        for i in range(len(p) - 1):
-            edges_to_include.add((p[i], p[i+1]))
+        for n in p: nodes_to_include.add(n)
+        for i in range(len(p) - 1): edges_to_include.add((p[i], p[i+1]))
             
     st.dataframe(pd.DataFrame(ubo_table_data), use_container_width=True)
     
-    # Masukkan anak perusahaan tingkat 1 ke bawah
+    # Tambahkan Anak Perusahaan (Successors) ke Bawah
     for successor in G.successors(selected_node_id):
         nodes_to_include.add(successor)
         edges_to_include.add((selected_node_id, successor))
+
+    # 🚨 ANTI-BLANK FALLBACK TRIGGER: Jika node terisolasi (tidak punya relasi atas maupun bawah)
+    if len(edges_to_include) == 0:
+        # Cari 5 transaksi acak yang berhubungan dengan node ini di master dataframe sebagai rumpun bantuan
+        backup_edges = edges_df[(edges_df['sumber'] == selected_node_id) | (edges_df['target'] == selected_node_id)].head(5)
+        for _, r in backup_edges.iterrows():
+            nodes_to_include.add(int(r['sumber']))
+            nodes_to_include.add(int(r['target']))
+            edges_to_include.add((int(r['sumber']), int(r['target'])))
+
+    # Jika BENAR-BENAR sebatang kara di database, ambil 3 data sampel acak luar agar D3 tidak crash kosong
+    if len(edges_to_include) == 0:
+        sample = edges_df.head(3)
+        for _, r in sample.iterrows():
+            nodes_to_include.add(int(r['sumber']))
+            nodes_to_include.add(int(r['target']))
+            edges_to_include.add((int(r['sumber']), int(r['target'])))
         
-    # Pembuatan objek Nodes untuk D3
+    # Buat JSON Node List
     d3_nodes = []
     for nid in nodes_to_include:
         if nid in G:
@@ -149,7 +162,7 @@ if selected_node_id is not None:
                 "is_target": bool(nid == selected_node_id)
             })
             
-    # CRITICAL FIX: Hanya masukkan link jika KEDUA ujung ID-nya ada di daftar d3_nodes/nodes_to_include
+    # Buat JSON Link List (Validasi Ketat Kedua Ujung Eksis)
     d3_links = []
     for u, v in edges_to_include:
         if u in nodes_to_include and v in nodes_to_include:
@@ -165,7 +178,7 @@ if selected_node_id is not None:
     network_data = {"nodes": d3_nodes, "links": d3_links}
     
 else:
-    st.info("💡 Masukkan nama atau ID Wajib Pajak di sidebar untuk mendeteksi UBO dan memetakan struktur kepemilikannya.")
+    st.info("💡 Masukkan nama atau ID Wajib Pajak di sidebar untuk mendeteksi UBO.")
     top_edges = edges_df.nlargest(40, 'nilai')
     sample_node_ids = set(top_edges['sumber'].tolist() + top_edges['target'].tolist())
     
@@ -173,7 +186,6 @@ else:
     d3_links = [{"source": str(int(r['sumber'])), "target": str(int(r['target'])), "persentase": float(r['persentase']), "nilai": float(r['nilai']), "dividen": float(r['dividen'])} for _, r in top_edges.iterrows()]
     network_data = {"nodes": d3_nodes, "links": d3_links}
 
-# Konversi aman ke JSON String
 json_network_data = json.dumps(network_data)
 
 html_template = """
@@ -232,7 +244,6 @@ html_template = """
         });
 
         const gContainer = svg.append("g");
-
         svg.call(d3.zoom().scaleExtent([0.1, 4]).on("zoom", (e) => gContainer.attr("transform", e.transform)));
 
         function getNodeColor(d) {
@@ -306,7 +317,5 @@ html_template = """
 </html>
 """
 
-# Proses injeksi data yang bersih
 final_html = html_template.replace("__NETWORK_DATA__", json_network_data)
-
 components.html(final_html, height=620, scrolling=False)
