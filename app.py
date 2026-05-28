@@ -16,7 +16,7 @@ Aplikasi ini mendeteksi struktur kepemilikan berlapis, akumulasi persentase saha
 def load_data():
     nodes = pd.read_csv('nodes_masked.csv')
     edges = pd.read_csv('edges_masked.csv')
-    # Pastikan ID dan referensi relasi bertipe string/numeric konsisten
+    # Memastikan format ID seragam sebagai integer
     nodes['id'] = nodes['id'].astype(int)
     edges['sumber'] = edges['sumber'].astype(int)
     edges['target'] = edges['target'].astype(int)
@@ -108,7 +108,7 @@ if search_query:
     else:
         st.sidebar.warning("Wajib Pajak tidak ditemukan.")
 
-# Build visualization subset
+# Pembuatan data visualisasi
 if selected_node_id is not None:
     st.subheader(f"📊 Hasil Analisis Jalur UBO untuk: {G.nodes[selected_node_id].get('nama')} ({selected_node_id})")
     
@@ -133,10 +133,12 @@ if selected_node_id is not None:
             
     st.dataframe(pd.DataFrame(ubo_table_data), use_container_width=True)
     
+    # Masukkan anak perusahaan tingkat 1 ke bawah
     for successor in G.successors(selected_node_id):
         nodes_to_include.add(successor)
         edges_to_include.add((selected_node_id, successor))
         
+    # Pembuatan objek Nodes untuk D3
     d3_nodes = []
     for nid in nodes_to_include:
         if nid in G:
@@ -147,16 +149,18 @@ if selected_node_id is not None:
                 "is_target": bool(nid == selected_node_id)
             })
             
+    # CRITICAL FIX: Hanya masukkan link jika KEDUA ujung ID-nya ada di daftar d3_nodes/nodes_to_include
     d3_links = []
     for u, v in edges_to_include:
-        if G.has_edge(u, v):
-            d3_links.append({
-                "source": str(u),
-                "target": str(v),
-                "persentase": float(G[u][v].get('persentase', 0)),
-                "nilai": float(G[u][v].get('nilai', 0)),
-                "dividen": float(G[u][v].get('dividen', 0))
-            })
+        if u in nodes_to_include and v in nodes_to_include:
+            if G.has_edge(u, v):
+                d3_links.append({
+                    "source": str(u),
+                    "target": str(v),
+                    "persentase": float(G[u][v].get('persentase', 0)),
+                    "nilai": float(G[u][v].get('nilai', 0)),
+                    "dividen": float(G[u][v].get('dividen', 0))
+                })
             
     network_data = {"nodes": d3_nodes, "links": d3_links}
     
@@ -169,10 +173,9 @@ else:
     d3_links = [{"source": str(int(r['sumber'])), "target": str(int(r['target'])), "persentase": float(r['persentase']), "nilai": float(r['nilai']), "dividen": float(r['dividen'])} for _, r in top_edges.iterrows()]
     network_data = {"nodes": d3_nodes, "links": d3_links}
 
-# Ubah ke JSON String secara aman
+# Konversi aman ke JSON String
 json_network_data = json.dumps(network_data)
 
-# Menggunakan placeholder __NETWORK_DATA__ untuk menghindari konflik persen (%) dengan Python string formatting
 html_template = """
 <!DOCTYPE html>
 <html lang="en">
@@ -209,7 +212,6 @@ html_template = """
     </div>
 
     <script>
-        // Placeholder akan diganti melalui fungsi .replace() Python secara aman
         const graphData = __NETWORK_DATA__;
 
         const width = document.getElementById('graph-container').clientWidth || 1000;
@@ -304,7 +306,7 @@ html_template = """
 </html>
 """
 
-# Gunakan fungsi bawaan string `.replace()` agar aman dari konflik parsing % di CSS/JS
+# Proses injeksi data yang bersih
 final_html = html_template.replace("__NETWORK_DATA__", json_network_data)
 
 components.html(final_html, height=620, scrolling=False)
